@@ -15,7 +15,7 @@ const USERS = {
   amit: 'pass789'
   // ...add more as needed
 };
-const SESSION_SECRET = process.env.SESSION_SECRET || 'yoursecretkey';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'ANU123RAG';
 
 // === EXPRESS APP SETUP ===
 const app = express();
