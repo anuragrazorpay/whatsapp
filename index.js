@@ -2,132 +2,144 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 8080;
-const sessionPath = process.env.WHATSAPP_SESSION || './whatsapp-session';
-
-app.use(cors()); // Allow all origins (adjust as needed for security)
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-let qrCodeDataUrl = null;
-let isReady = false;
-let client;
+// Store all WhatsApp client sessions here
+const SESSIONS = {}; // { [sessionName]: { client, ready, qr } }
 
-async function startWhatsAppClient() {
-  client = new Client({
-    authStrategy: new LocalAuth({ clientId: "client-one", dataPath: sessionPath }),
+// Create a directory for all sessions
+const SESSIONS_PATH = path.resolve(__dirname, 'sessions');
+if (!fs.existsSync(SESSIONS_PATH)) fs.mkdirSync(SESSIONS_PATH);
+
+function startSession(sessionName) {
+  if (SESSIONS[sessionName]) return SESSIONS[sessionName];
+
+  const sessionDataPath = path.join(SESSIONS_PATH, sessionName);
+  if (!fs.existsSync(sessionDataPath)) fs.mkdirSync(sessionDataPath);
+
+  const session = { ready: false, qr: null };
+
+  session.client = new Client({
+    authStrategy: new LocalAuth({ clientId: sessionName, dataPath: sessionDataPath }),
     puppeteer: {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    }
+    },
   });
 
-  client.on('qr', (qr) => {
-    console.log('QR RECEIVED, ready to scan.');
-    qrcode.generate(qr, { small: true }); // For CLI debug
-    QRCode.toDataURL(qr).then(url => {
-      qrCodeDataUrl = url;
-      console.log('QR Data URL generated.');
-    });
-    isReady = false;
+  session.client.on('qr', (qr) => {
+    session.qr = qr;
+    session.ready = false;
+    console.log(`[${sessionName}] QR generated`);
   });
 
-  client.on('ready', () => {
-    console.log('WhatsApp Client is ready!');
-    isReady = true;
-    qrCodeDataUrl = null;
+  session.client.on('ready', () => {
+    session.ready = true;
+    session.qr = null;
+    console.log(`[${sessionName}] WhatsApp is ready!`);
   });
 
-  client.on('authenticated', () => {
-    console.log('WhatsApp Client authenticated');
+  session.client.on('authenticated', () => {
+    console.log(`[${sessionName}] WhatsApp authenticated`);
   });
 
-  client.on('auth_failure', msg => {
-    console.error('Authentication failure', msg);
-    isReady = false;
-    qrCodeDataUrl = null;
+  session.client.on('auth_failure', (msg) => {
+    session.ready = false;
+    session.qr = null;
+    console.error(`[${sessionName}] Auth failure: ${msg}`);
   });
 
-  client.on('disconnected', (reason) => {
-    console.log('Client disconnected:', reason);
-    isReady = false;
-    qrCodeDataUrl = null;
-    client.destroy();
-    startWhatsAppClient();
+  session.client.on('disconnected', (reason) => {
+    session.ready = false;
+    session.qr = null;
+    console.log(`[${sessionName}] Disconnected: ${reason}`);
+    session.client.destroy();
+    // Optionally restart the session for auto-recovery
+    setTimeout(() => startSession(sessionName), 5000);
   });
 
-  await client.initialize();
+  session.client.initialize();
+  SESSIONS[sessionName] = session;
+  return session;
 }
 
-startWhatsAppClient().catch(console.error);
-
-// ====== OPEN ENDPOINTS ======
-
-// QR code image (PNG) endpoint
-app.get('/qr', (req, res) => {
-  if (!qrCodeDataUrl) return res.status(404).send('No QR available');
-  const img = qrCodeDataUrl.split(',')[1];
-  const buf = Buffer.from(img, 'base64');
-  res.writeHead(200, {
-    'Content-Type': 'image/png',
-    'Content-Length': buf.length
-  });
-  res.end(buf);
+// GET /qr?session=anurag
+app.get('/qr', async (req, res) => {
+  const sessionName = req.query.session;
+  if (!sessionName) return res.status(400).send('Session name required');
+  const session = startSession(sessionName);
+  if (!session.qr) return res.status(404).send('No QR available');
+  // Serve as PNG image
+  try {
+    const url = await QRCode.toDataURL(session.qr);
+    const img = url.split(',')[1];
+    const buf = Buffer.from(img, 'base64');
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': buf.length,
+    });
+    res.end(buf);
+  } catch (e) {
+    res.status(500).send('Failed to generate QR');
+  }
 });
 
-// Status endpoint
+// GET /status?session=anurag
 app.get('/status', (req, res) => {
+  const sessionName = req.query.session;
+  if (!sessionName) return res.status(400).json({ error: 'Session name required' });
+  const session = startSession(sessionName);
   res.json({
-    connected: isReady,
-    statusText: isReady ? "Connected ✅" : (qrCodeDataUrl ? "Scan QR code below to connect" : "Connecting..."),
-    qr: !!qrCodeDataUrl
+    connected: session.ready,
+    statusText: session.ready ? 'Connected ✅' : (session.qr ? 'Scan QR to connect' : 'Connecting...'),
+    qr: !!session.qr
   });
 });
 
-// Send WhatsApp message endpoint (open to all POST requests)
+// POST /send-whatsapp  { number, message, session }
 app.post('/send-whatsapp', async (req, res) => {
-  const { number, message } = req.body;
+  const { number, message, session: sessionName } = req.body;
+  if (!sessionName) return res.status(400).json({ status: 'error', error: 'Session name required' });
+  if (!number || !message) return res.status(400).json({ status: 'error', error: 'Missing number or message' });
 
-  if (!number || !message) {
-    return res.status(400).json({ status: 'error', error: 'Missing number or message' });
+  const session = startSession(sessionName);
+
+  if (!session.ready) {
+    return res.status(503).json({ status: 'error', error: `WhatsApp client not ready for session ${sessionName}` });
   }
 
   const sanitizedNumber = number.replace(/\D/g, '');
-  if (sanitizedNumber.length < 10) {
-    return res.status(400).json({ status: 'error', error: 'Invalid phone number' });
-  }
-
-  if (!isReady) {
-    return res.status(503).json({ status: 'error', error: 'WhatsApp client not ready' });
-  }
-
-  const chatId = sanitizedNumber.includes('@c.us') ? sanitizedNumber : `${sanitizedNumber}@c.us`;
+  const chatId = sanitizedNumber.endsWith('@c.us') ? sanitizedNumber : `${sanitizedNumber}@c.us`;
 
   try {
-    await client.sendMessage(chatId, message);
+    await session.client.sendMessage(chatId, message);
     return res.json({ status: 'success', message: 'Message sent' });
   } catch (err) {
-    console.error('Send message error:', err);
+    console.error(`[${sessionName}] Send message error:`, err);
     return res.status(500).json({ status: 'error', error: 'Failed to send message' });
   }
 });
 
-// Root: Simple landing/status page (optional)
+// Landing page (optional)
 app.get('/', (req, res) => {
   res.send(`
-    <h1>WhatsApp Web API Server</h1>
+    <h1>Multi-Session WhatsApp Web API</h1>
     <ul>
-      <li><a href="/status">/status</a> - Get connection status</li>
-      <li><a href="/qr">/qr</a> - Get current QR code (PNG)</li>
-      <li>/send-whatsapp [POST] - Send WhatsApp message</li>
+      <li><b>/qr?session=NAME</b> - Get QR code for a session</li>
+      <li><b>/status?session=NAME</b> - Get WhatsApp status for a session</li>
+      <li><b>POST /send-whatsapp {number, message, session}</b> - Send WhatsApp message</li>
     </ul>
   `);
 });
 
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`Multi-Session WhatsApp backend running on port ${port}`);
 });
