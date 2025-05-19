@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Login - WhatsApp Portal</title>
+  <style>
+    body { font-family: sans-serif; margin: 40px auto; max-width: 360px; }
+    .error { color: #D32F2F; }
+    input { margin: 6px 0; width: 100%; padding: 8px; }
+    button { width: 100%; padding: 10px; background: #006AFF; color: #fff; border: none; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h2>Team WhatsApp Portal</h2>
+  <% if (error) { %><div class="error"><%= error %></div><% } %>
+  <form method="POST" action="/login">
+    <input name="username" placeholder="Username" required /><br />
+    <input name="password" placeholder="Password" type="password" required /><br />
+    <button type="submit">Login</button>
+  </form>
+</body>
+</html>
