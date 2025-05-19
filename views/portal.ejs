@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WhatsApp Portal</title>
+  <style>
+    body { font-family: sans-serif; margin: 40px auto; max-width: 400px; }
+    .success { color: #388E3C; }
+    .error { color: #D32F2F; }
+    .qrcode { text-align: center; margin: 20px 0; }
+    button { padding: 8px 12px; background: #006AFF; color: #fff; border: none; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h2>Hi <%= username %>!</h2>
+  <form action="/logout" method="get" style="float:right;">
+    <button type="submit" style="background:#888;">Log out of Portal</button>
+  </form>
+  <% if (connected) { %>
+    <div class="success">✅ WhatsApp is connected.</div>
+    <form action="/portal/logout" method="post">
+      <button type="submit">Log out of WhatsApp</button>
+    </form>
+  <% } else if (qrDataUrl) { %>
+    <div class="qrcode">
+      <img src="<%= qrDataUrl %>" alt="Scan QR" />
+      <div>Scan this QR with WhatsApp to connect.</div>
+    </div>
+  <% } else { %>
+    <div>Connecting to WhatsApp...</div>
+  <% } %>
+  <% if (error) { %><div class="error"><%= error %></div><% } %>
+</body>
+</html>
