@@ -20,6 +20,9 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     lsb-release \
     xdg-utils \
+    libu2f-udev \
+    libv4l-0 \
+    libpulse0 \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
