@@ -25,10 +25,13 @@ async function startWhatsAppClient() {
   });
 
   client.on('qr', (qr) => {
-    qrcode.generate(qr, { small: true });
+    console.log('QR RECEIVED, ready to scan.');
+    qrcode.generate(qr, { small: true }); // Terminal display
     QRCode.toDataURL(qr).then(url => {
       qrCodeDataUrl = url;
+      console.log('QR Data URL generated.');
     });
+    isReady = false;
   });
 
   client.on('ready', () => {
@@ -44,6 +47,7 @@ async function startWhatsAppClient() {
   client.on('auth_failure', msg => {
     console.error('Authentication failure', msg);
     isReady = false;
+    qrCodeDataUrl = null;
   });
 
   client.on('disconnected', (reason) => {
@@ -67,7 +71,7 @@ app.post('/send-whatsapp', async (req, res) => {
     return res.status(400).json({ status: 'error', error: 'Missing number or message' });
   }
 
-  const sanitizedNumber = number.replace(/\D/g, '');
+  const sanitizedNumber = number.replace(/\D/g, ''); // Remove non-digit chars
   if (sanitizedNumber.length < 10) {
     return res.status(400).json({ status: 'error', error: 'Invalid phone number' });
   }
@@ -87,11 +91,26 @@ app.post('/send-whatsapp', async (req, res) => {
   }
 });
 
-// Simple connection status and QR code
-app.get('/', (req, res) => {
-  let qrImage = qrCodeDataUrl ? `<img src="${qrCodeDataUrl}" alt="QR Code" />` : '';
-  let statusText = isReady ? "Connected ✅" : (qrCodeDataUrl ? "Scan QR code below to connect" : "Connecting...");
+// API Endpoint: QR code image (PNG)
+app.get('/qr', (req, res) => {
+  if (!qrCodeDataUrl) return res.status(404).send('No QR');
+  const img = qrCodeDataUrl.split(',')[1];
+  const buf = Buffer.from(img, 'base64');
+  res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': buf.length });
+  res.end(buf);
+});
 
+// API Endpoint: Status (JSON)
+app.get('/status', (req, res) => {
+  res.json({
+    connected: isReady,
+    statusText: isReady ? "Connected ✅" : (qrCodeDataUrl ? "Scan QR code below to connect" : "Connecting..."),
+    qr: !!qrCodeDataUrl
+  });
+});
+
+// Frontend UI
+app.get('/', (req, res) => {
   res.send(`
   <!DOCTYPE html>
   <html lang="en">
@@ -111,8 +130,8 @@ app.get('/', (req, res) => {
   </head>
   <body>
     <h1>WhatsApp Web API</h1>
-    <div id="status">Status: ${statusText}</div>
-    ${qrImage}
+    <div id="status">Status: Connecting...</div>
+    <div id="qrDiv"></div>
     <form id="sendForm">
       <label for="number">Phone Number (with country code, no +):</label>
       <input type="text" id="number" name="number" required placeholder="e.g. 919876543210" />
@@ -123,9 +142,23 @@ app.get('/', (req, res) => {
     <div id="result"></div>
 
     <script>
+      function pollStatus() {
+        fetch('/status')
+        .then(r => r.json())
+        .then(s => {
+          document.getElementById('status').textContent = 'Status: ' + s.statusText;
+          if (s.qr && !s.connected) {
+            document.getElementById('qrDiv').innerHTML = '<img src="/qr?' + Date.now() + '" alt="QR Code" />';
+          } else {
+            document.getElementById('qrDiv').innerHTML = '';
+          }
+        });
+      }
+      setInterval(pollStatus, 4000);
+      pollStatus();
+
       const form = document.getElementById('sendForm');
       const resultDiv = document.getElementById('result');
-
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         resultDiv.textContent = '';
