@@ -44,7 +44,7 @@ function startSession(sessionName) {
   const sessionDataPath = path.join(SESSIONS_PATH, sessionName);
   if (!fs.existsSync(sessionDataPath)) fs.mkdirSync(sessionDataPath);
 
-  const session = { ready: false, qr: null };
+  const session = { ready: false, qr: null, metrics: { messagesSent: 0, lastMessage: null, lastLogin: null } };
 
   session.client = new Client({
     authStrategy: new LocalAuth({ clientId: sessionName, dataPath: sessionDataPath }),
@@ -57,16 +57,19 @@ function startSession(sessionName) {
   session.client.on('qr', (qr) => {
     session.qr = qr;
     session.ready = false;
+    session.metrics.lastLogin = new Date().toISOString();
     console.log(`[${sessionName}] QR generated`);
   });
 
   session.client.on('ready', () => {
     session.ready = true;
     session.qr = null;
+    session.metrics.lastLogin = new Date().toISOString();
     console.log(`[${sessionName}] WhatsApp is ready!`);
   });
 
   session.client.on('authenticated', () => {
+    session.metrics.lastLogin = new Date().toISOString();
     console.log(`[${sessionName}] WhatsApp authenticated`);
   });
 
@@ -177,6 +180,8 @@ app.post('/send-whatsapp', requireLogin, async (req, res) => {
 
   try {
     await session.client.sendMessage(chatId, message);
+    session.metrics.messagesSent = (session.metrics.messagesSent || 0) + 1;
+    session.metrics.lastMessage = new Date().toISOString();
     return res.json({ status: 'success', message: 'Message sent' });
   } catch (err) {
     return res.status(500).json({ status: 'error', error: 'Failed to send message' });
@@ -193,6 +198,21 @@ app.get('/', (req, res) => {
 
 // Static assets for EJS styles, etc.
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ===== ADMIN SESSIONS ENDPOINT =====
+app.get('/admin/sessions', (req, res) => {
+  const adminSecret = process.env.ADMIN_SECRET || 'supersecret123';
+  if (req.query.secret !== adminSecret) {
+    return res.status(403).send('Forbidden');
+  }
+  const sessionsInfo = Object.entries(SESSIONS).map(([name, session]) => ({
+    session: name,
+    connected: !!session.ready,
+    qr: !!session.qr,
+    metrics: session.metrics || {}
+  }));
+  res.json(sessionsInfo);
+});
 
 app.listen(port, () => {
   console.log(`WhatsApp Portal running on port ${port}`);
