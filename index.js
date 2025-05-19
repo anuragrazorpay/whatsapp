@@ -1,21 +1,40 @@
 require('dotenv').config();
 const express = require('express');
+const session = require('express-session');
 const cors = require('cors');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
 
+// === CONFIG ===
+const USERS = {
+  // username: password
+  anurag: 'pass123',
+  pooja: 'pass456',
+  amit: 'pass789'
+  // ...add more as needed
+};
+const SESSION_SECRET = process.env.SESSION_SECRET || 'yoursecretkey';
+
+// === EXPRESS APP SETUP ===
 const app = express();
 const port = process.env.PORT || 8080;
+
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false
+}));
 
-// Store all WhatsApp client sessions here
-const SESSIONS = {}; // { [sessionName]: { client, ready, qr } }
-
-// Create a directory for all sessions
+// === MULTI-SESSION WHATSAPP SETUP ===
+const SESSIONS = {};
 const SESSIONS_PATH = path.resolve(__dirname, 'sessions');
 if (!fs.existsSync(SESSIONS_PATH)) fs.mkdirSync(SESSIONS_PATH);
 
@@ -62,7 +81,6 @@ function startSession(sessionName) {
     session.qr = null;
     console.log(`[${sessionName}] Disconnected: ${reason}`);
     session.client.destroy();
-    // Optionally restart the session for auto-recovery
     setTimeout(() => startSession(sessionName), 5000);
   });
 
@@ -71,51 +89,89 @@ function startSession(sessionName) {
   return session;
 }
 
-// GET /qr?session=anurag
-app.get('/qr', async (req, res) => {
-  const sessionName = req.query.session;
-  if (!sessionName) return res.status(400).send('Session name required');
-  const session = startSession(sessionName);
-  if (!session.qr) return res.status(404).send('No QR available');
-  // Serve as PNG image
-  try {
-    const url = await QRCode.toDataURL(session.qr);
-    const img = url.split(',')[1];
-    const buf = Buffer.from(img, 'base64');
-    res.writeHead(200, {
-      'Content-Type': 'image/png',
-      'Content-Length': buf.length,
-    });
-    res.end(buf);
-  } catch (e) {
-    res.status(500).send('Failed to generate QR');
+// === AUTH MIDDLEWARE ===
+function requireLogin(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.redirect('/login');
   }
+  req.session.user = req.session.user.toLowerCase();
+  next();
+}
+
+// === ROUTES ===
+
+// Login page
+app.get('/login', (req, res) => {
+  res.render('login', { error: null });
 });
 
-// GET /status?session=anurag
-app.get('/status', (req, res) => {
-  const sessionName = req.query.session;
-  if (!sessionName) return res.status(400).json({ error: 'Session name required' });
-  const session = startSession(sessionName);
-  res.json({
-    connected: session.ready,
-    statusText: session.ready ? 'Connected ✅' : (session.qr ? 'Scan QR to connect' : 'Connecting...'),
-    qr: !!session.qr
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  if (USERS[username] && USERS[username] === password) {
+    req.session.user = username;
+    return res.redirect('/portal');
+  }
+  res.render('login', { error: 'Invalid credentials.' });
+});
+
+// Logout from web portal session
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.redirect('/login');
   });
 });
 
-// POST /send-whatsapp  { number, message, session }
-app.post('/send-whatsapp', async (req, res) => {
-  const { number, message, session: sessionName } = req.body;
-  if (!sessionName) return res.status(400).json({ status: 'error', error: 'Session name required' });
-  if (!number || !message) return res.status(400).json({ status: 'error', error: 'Missing number or message' });
+// Main portal
+app.get('/portal', requireLogin, async (req, res) => {
+  const sessionName = req.session.user;
+  const session = startSession(sessionName);
+  let qrDataUrl = null;
+  if (session.qr) {
+    qrDataUrl = await QRCode.toDataURL(session.qr);
+  }
+  res.render('portal', {
+    username: sessionName,
+    connected: session.ready,
+    qrDataUrl,
+    error: null
+  });
+});
 
+// Log out WhatsApp session
+app.post('/portal/logout', requireLogin, async (req, res) => {
+  const sessionName = req.session.user;
+  const session = SESSIONS[sessionName];
+  if (session && session.client) {
+    try {
+      await session.client.logout();
+      session.ready = false;
+      session.qr = null;
+    } catch (e) {
+      return res.render('portal', {
+        username: sessionName,
+        connected: false,
+        qrDataUrl: null,
+        error: "Couldn't log out from WhatsApp. Try again."
+      });
+    }
+  }
+  // Re-initialize session to generate new QR
+  setTimeout(() => startSession(sessionName), 1000);
+  res.redirect('/portal');
+});
+
+// (Optional) API endpoint for sending WhatsApp messages
+app.post('/send-whatsapp', requireLogin, async (req, res) => {
+  const { number, message } = req.body;
+  const sessionName = req.session.user;
   const session = startSession(sessionName);
 
   if (!session.ready) {
     return res.status(503).json({ status: 'error', error: `WhatsApp client not ready for session ${sessionName}` });
   }
-
+  if (!number || !message) {
+    return res.status(400).json({ status: 'error', error: 'Missing number or message' });
+  }
   const sanitizedNumber = number.replace(/\D/g, '');
   const chatId = sanitizedNumber.endsWith('@c.us') ? sanitizedNumber : `${sanitizedNumber}@c.us`;
 
@@ -123,23 +179,21 @@ app.post('/send-whatsapp', async (req, res) => {
     await session.client.sendMessage(chatId, message);
     return res.json({ status: 'success', message: 'Message sent' });
   } catch (err) {
-    console.error(`[${sessionName}] Send message error:`, err);
     return res.status(500).json({ status: 'error', error: 'Failed to send message' });
   }
 });
 
-// Landing page (optional)
+// Home page
 app.get('/', (req, res) => {
-  res.send(`
-    <h1>Multi-Session WhatsApp Web API</h1>
-    <ul>
-      <li><b>/qr?session=NAME</b> - Get QR code for a session</li>
-      <li><b>/status?session=NAME</b> - Get WhatsApp status for a session</li>
-      <li><b>POST /send-whatsapp {number, message, session}</b> - Send WhatsApp message</li>
-    </ul>
-  `);
+  if (req.session && req.session.user) {
+    return res.redirect('/portal');
+  }
+  res.redirect('/login');
 });
 
+// Static assets for EJS styles, etc.
+app.use(express.static(path.join(__dirname, 'public')));
+
 app.listen(port, () => {
-  console.log(`Multi-Session WhatsApp backend running on port ${port}`);
+  console.log(`WhatsApp Portal running on port ${port}`);
 });
