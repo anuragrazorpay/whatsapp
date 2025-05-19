@@ -5,7 +5,7 @@ const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080;
 const sessionPath = process.env.WHATSAPP_SESSION || './whatsapp-session';
 
 app.use(express.json());
